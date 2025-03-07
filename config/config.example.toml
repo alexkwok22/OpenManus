@@ -1,6 +1,7 @@
 # Global LLM configuration
 [llm]
-model = "claude-3-5-sonnet"
+provider = "openai"  # AI提供商（openai或gemini）
+model = "gpt-4o"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-..."
 max_tokens = 4096
@@ -8,6 +9,25 @@ temperature = 0.0
 
 # Optional configuration for specific LLM models
 [llm.vision]
-model = "claude-3-5-sonnet"
+provider = "openai"
+model = "gpt-4o"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-..."
+
+# Google Gemini 1.5 配置
+[llm.gemini]
+provider = "gemini"
+model = "gemini-1.5-flash"
+base_url = ""  # 不需要，使用默認
+api_key = "..."  # 替換為你的 Gemini API 金鑰
+max_tokens = 4096
+temperature = 0.0
+
+# Google Gemini 2.0 配置（使用新版SDK）
+[llm.gemini2]
+provider = "gemini_new"
+model = "gemini-2.0-flash"
+base_url = ""  # 不需要，使用默認
+api_key = "..."  # 替換為你的 Gemini API 金鑰
+max_tokens = 4096
+temperature = 0.0

@@ -9,6 +9,14 @@ from openai import (
 )
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
+# 添加 Gemini API 的導入
+import google.generativeai as genai
+try:
+    from google import genai as google_genai
+    HAS_NEW_GEMINI_SDK = True
+except ImportError:
+    HAS_NEW_GEMINI_SDK = False
+
 from app.config import LLMSettings, config
 from app.logger import logger  # Assuming a logger is set up in your app
 from app.schema import Message
@@ -35,9 +43,24 @@ class LLM:
             self.model = llm_config.model
             self.max_tokens = llm_config.max_tokens
             self.temperature = llm_config.temperature
-            self.client = AsyncOpenAI(
-                api_key=llm_config.api_key, base_url=llm_config.base_url
-            )
+            self.provider = llm_config.provider
+            
+            # 根據提供商決定使用哪個客戶端
+            if self.provider == "openai":
+                self.client = AsyncOpenAI(
+                    api_key=llm_config.api_key, base_url=llm_config.base_url
+                )
+            elif self.provider == "gemini":
+                # 配置 Gemini API
+                genai.configure(api_key=llm_config.api_key)
+                self.gemini_client = genai
+            elif self.provider == "gemini_new" and HAS_NEW_GEMINI_SDK:
+                # 配置新版 Gemini SDK
+                self.genai_client = google_genai.Client(api_key=llm_config.api_key)
+            else:
+                if self.provider == "gemini_new" and not HAS_NEW_GEMINI_SDK:
+                    raise ImportError("新版 Gemini SDK 未安裝，請執行 pip install google-genai>=1.0.0")
+                raise ValueError(f"不支持的提供商: {self.provider}")
 
     @staticmethod
     def format_messages(messages: List[Union[dict, Message]]) -> List[dict]:
@@ -123,39 +146,127 @@ class LLM:
             else:
                 messages = self.format_messages(messages)
 
-            if not stream:
-                # Non-streaming request
+            # 根據提供商選擇不同的實現
+            if self.provider == "openai":
+                if not stream:
+                    # Non-streaming request
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=temperature or self.temperature,
+                        stream=False,
+                    )
+                    if not response.choices or not response.choices[0].message.content:
+                        raise ValueError("Empty or invalid response from LLM")
+                    return response.choices[0].message.content
+
+                # Streaming request
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     max_tokens=self.max_tokens,
                     temperature=temperature or self.temperature,
-                    stream=False,
+                    stream=True,
                 )
-                if not response.choices or not response.choices[0].message.content:
-                    raise ValueError("Empty or invalid response from LLM")
-                return response.choices[0].message.content
 
-            # Streaming request
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=temperature or self.temperature,
-                stream=True,
-            )
+                collected_messages = []
+                async for chunk in response:
+                    chunk_message = chunk.choices[0].delta.content or ""
+                    collected_messages.append(chunk_message)
+                    print(chunk_message, end="", flush=True)
 
-            collected_messages = []
-            async for chunk in response:
-                chunk_message = chunk.choices[0].delta.content or ""
-                collected_messages.append(chunk_message)
-                print(chunk_message, end="", flush=True)
-
-            print()  # Newline after streaming
-            full_response = "".join(collected_messages).strip()
-            if not full_response:
-                raise ValueError("Empty response from streaming LLM")
-            return full_response
+                print()  # Newline after streaming
+                full_response = "".join(collected_messages).strip()
+                if not full_response:
+                    raise ValueError("Empty response from streaming LLM")
+                return full_response
+            
+            elif self.provider == "gemini":
+                # 將標準消息轉換為 Gemini 格式
+                gemini_messages = self._convert_to_gemini_format(messages)
+                
+                # 創建生成模型
+                model = self.gemini_client.GenerativeModel(self.model)
+                
+                if not stream:
+                    # 非流式請求
+                    response = model.generate_content(
+                        gemini_messages,
+                        generation_config={
+                            "max_output_tokens": self.max_tokens,
+                            "temperature": temperature or self.temperature,
+                        }
+                    )
+                    if not response.text:
+                        raise ValueError("從 Gemini 返回的響應為空")
+                    return response.text
+                
+                # 流式請求
+                response = model.generate_content(
+                    gemini_messages,
+                    generation_config={
+                        "max_output_tokens": self.max_tokens,
+                        "temperature": temperature or self.temperature,
+                    },
+                    stream=True
+                )
+                
+                collected_messages = []
+                for chunk in response:
+                    chunk_text = chunk.text
+                    collected_messages.append(chunk_text)
+                    print(chunk_text, end="", flush=True)
+                
+                print()  # 流式輸出後換行
+                full_response = "".join(collected_messages).strip()
+                if not full_response:
+                    raise ValueError("從流式 Gemini 返回的響應為空")
+                return full_response
+                
+            elif self.provider == "gemini_new":
+                # 將標準消息轉換為新版 Gemini SDK 格式
+                gemini_content = self._convert_to_new_gemini_format(messages)
+                
+                if not stream:
+                    # 非流式請求
+                    response = self.genai_client.models.generate_content(
+                        model=self.model,
+                        contents=gemini_content,
+                        generation_config={
+                            "temperature": temperature or self.temperature,
+                            "max_output_tokens": self.max_tokens,
+                        }
+                    )
+                    if not response.text:
+                        raise ValueError("從新版 Gemini 返回的響應為空")
+                    return response.text
+                
+                # 流式請求
+                response = self.genai_client.models.generate_content(
+                    model=self.model,
+                    contents=gemini_content,
+                    generation_config={
+                        "temperature": temperature or self.temperature,
+                        "max_output_tokens": self.max_tokens,
+                    },
+                    stream=True
+                )
+                
+                collected_messages = []
+                for chunk in response:
+                    chunk_text = chunk.text
+                    collected_messages.append(chunk_text)
+                    print(chunk_text, end="", flush=True)
+                
+                print()  # 流式輸出後換行
+                full_response = "".join(collected_messages).strip()
+                if not full_response:
+                    raise ValueError("從流式新版 Gemini 返回的響應為空")
+                return full_response
+            
+            else:
+                raise ValueError(f"不支持的提供商: {self.provider}")
 
         except ValueError as ve:
             logger.error(f"Validation error: {ve}")
@@ -166,6 +277,63 @@ class LLM:
         except Exception as e:
             logger.error(f"Unexpected error in ask: {e}")
             raise
+            
+    def _convert_to_gemini_format(self, messages):
+        """將標準消息轉換為 Gemini API 格式"""
+        history = []
+        system_content = None
+        
+        # 提取系統消息
+        for msg in messages:
+            if msg["role"] == "system":
+                system_content = msg.get("content", "")
+                break
+        
+        # 構建對話歷史
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", "")
+            
+            if role == "user":
+                # 如果存在系統消息，將其添加到用戶消息前
+                if system_content and not history:
+                    content = f"[System Instructions: {system_content}] {content}"
+                history.append({"role": "user", "parts": [content]})
+            elif role == "assistant":
+                history.append({"role": "model", "parts": [content]})
+            # 忽略系統消息，因為我們已經單獨處理了
+        
+        return history
+        
+    def _convert_to_new_gemini_format(self, messages):
+        """將標準消息轉換為新版 Gemini SDK 格式"""
+        # 新版 SDK 的消息格式
+        content_parts = []
+        system_content = None
+        
+        # 提取系統消息
+        for msg in messages:
+            if msg["role"] == "system":
+                system_content = msg.get("content", "")
+                break
+                
+        # 構建對話內容
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", "")
+            
+            if role == "user":
+                # 如果存在系統消息，在第一個用戶消息中添加
+                if system_content and not content_parts:
+                    # 添加系統指令作為用戶的指示
+                    content_parts.append({"text": f"[System Instructions: {system_content}] {content}"})
+                else:
+                    content_parts.append({"text": content})
+            elif role == "assistant":
+                content_parts.append({"text": content})
+            # 忽略系統消息，因為我們已經單獨處理了
+                
+        return content_parts
 
     @retry(
         wait=wait_random_exponential(min=1, max=60),

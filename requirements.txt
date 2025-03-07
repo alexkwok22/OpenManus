@@ -19,3 +19,7 @@ aiofiles~=24.1.0
 pydantic_core~=2.27.2
 colorama~=0.4.6
 playwright~=1.49.1
+
+# Google Gemini API SDK
+google-generativeai>=0.5.0  # 舊版 Gemini SDK（適用於 Gemini 1.5 及更早版本）
+google-genai>=1.0.0  # 新版 Gemini SDK（適用於 Gemini 2.0+）
